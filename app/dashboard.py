@@ -1,308 +1,281 @@
-from nicegui import ui
-from typing import Dict, Any, List, Optional
-from nicegui.elements.column import Column
-import asyncio
+from nicegui import ui, app
 from datetime import datetime
+from app.dashboard_service import DashboardService
+from app.models import TicketStatus, TicketPriority, TicketCategory
+import logging
 
-from app.services import TicketService, FlagService, ExportService, SeedService
-from app.components import (
-    FilterState,
-    create_topbar,
-    create_filter_bar,
-    create_kpi_section,
-    create_time_series_chart,
-    create_stacked_bar_chart,
-    create_team_bar_chart,
-    create_simple_tickets_table,
-    create_flagged_tickets_table,
-)
-
-
-class DashboardState:
-    """Global dashboard state management"""
-
-    def __init__(self):
-        self.filter_state = FilterState()
-        self.current_user_id = 1  # Placeholder - in real app would come from auth
-        self.selected_flagged_tickets: List[int] = []
-
-        # Refreshable components
-        self.kpi_container: Optional[Column] = None
-        self.charts_container: Optional[Column] = None
-        self.tickets_container: Optional[Column] = None
-        self.flagged_container: Optional[Column] = None
-
-        # Setup filter change callback
-        self.filter_state.add_callback(self.refresh_dashboard)
-
-    def refresh_dashboard(self):
-        """Refresh all dashboard components when filters change"""
-        if self.kpi_container:
-            self.refresh_kpis()
-        if self.charts_container:
-            self.refresh_charts()
-        if self.tickets_container:
-            self.refresh_tickets_tab()
-        if self.flagged_container:
-            self.refresh_flagged_tab()
-
-        # Update URL parameters
-        self.update_url_params()
-
-    def refresh_kpis(self):
-        """Refresh KPI section"""
-        if not self.kpi_container:
-            return
-
-        with self.kpi_container:
-            self.kpi_container.clear()
-            try:
-                kpi_data = TicketService.get_kpi_data(self.filter_state.to_filter_params())
-                create_kpi_section(kpi_data)
-            except Exception as e:
-                import logging
-
-                logging.error(f"Error loading KPIs: {str(e)}")
-                ui.label(f"Error loading KPIs: {str(e)}").classes("text-red-500")
-
-    def refresh_charts(self):
-        """Refresh charts section"""
-        if not self.charts_container:
-            return
-
-        with self.charts_container:
-            self.charts_container.clear()
-            try:
-                filters = self.filter_state.to_filter_params()
-
-                # Time series chart
-                with ui.card().classes("w-full p-4 mb-4"):
-                    time_series_data = TicketService.get_time_series_data(filters)
-                    create_time_series_chart(time_series_data)
-
-                with ui.row().classes("w-full gap-4"):
-                    # Stacked bar chart
-                    with ui.card().classes("flex-1 p-4"):
-                        stacked_data = TicketService.get_stacked_bar_data(filters)
-                        create_stacked_bar_chart(stacked_data)
-
-                    # Team bar chart
-                    with ui.card().classes("flex-1 p-4"):
-                        team_data = TicketService.get_team_ticket_counts(filters)
-                        create_team_bar_chart(team_data)
-
-            except Exception as e:
-                import logging
-
-                logging.error(f"Error loading charts: {str(e)}")
-                ui.label(f"Error loading charts: {str(e)}").classes("text-red-500")
-
-    def refresh_tickets_tab(self):
-        """Refresh tickets table"""
-        if not self.tickets_container:
-            return
-
-        with self.tickets_container:
-            self.tickets_container.clear()
-            try:
-                tickets = TicketService.get_filtered_tickets(self.filter_state.to_filter_params())
-
-                with ui.card().classes("w-full p-4"):
-                    ui.label(f"Tickets ({len(tickets)})").classes("text-lg font-semibold mb-4")
-
-                    if tickets:
-                        create_simple_tickets_table(tickets)
-                    else:
-                        ui.label("No tickets found").classes("text-center text-gray-500 p-8")
-
-            except Exception as e:
-                import logging
-
-                logging.error(f"Error loading tickets: {str(e)}")
-                ui.label(f"Error loading tickets: {str(e)}").classes("text-red-500")
-
-    def refresh_flagged_tab(self):
-        """Refresh flagged tickets table"""
-        if not self.flagged_container:
-            return
-
-        with self.flagged_container:
-            self.flagged_container.clear()
-            try:
-                flagged_data = FlagService.get_flagged_tickets(
-                    self.current_user_id, self.filter_state.to_filter_params()
-                )
-
-                with ui.card().classes("w-full p-4"):
-                    with ui.row().classes("w-full justify-between items-center mb-4"):
-                        ui.label(f"Flagged Tickets ({len(flagged_data)})").classes("text-lg font-semibold")
-
-                        with ui.row().classes("gap-2"):
-                            ui.button("Bulk Unflag", on_click=self.handle_bulk_unflag).props(
-                                "color=secondary outline"
-                            ).bind_enabled_from(self, "selected_flagged_tickets", lambda x: len(x) > 0)
-
-                            ui.button("Export CSV", on_click=self.handle_export_csv).props("color=primary outline")
-
-                    if flagged_data:
-                        create_flagged_tickets_table(
-                            flagged_data, self.selected_flagged_tickets, self.update_flagged_selection
-                        )
-                    else:
-                        ui.label("No flagged tickets found").classes("text-center text-gray-500 p-8")
-
-            except Exception as e:
-                import logging
-
-                logging.error(f"Error loading flagged tickets: {str(e)}")
-                ui.label(f"Error loading flagged tickets: {str(e)}").classes("text-red-500")
-
-    def handle_flag_change(self):
-        """Handle flag/unflag actions"""
-        # Refresh the tickets tab to show updated flag status
-        self.refresh_tickets_tab()
-
-    def update_flagged_selection(self, selected_ids: List[int]):
-        """Update selected flagged tickets"""
-        self.selected_flagged_tickets = selected_ids
-
-    def handle_bulk_unflag(self):
-        """Handle bulk unflag operation"""
-        if not self.selected_flagged_tickets:
-            ui.notify("No tickets selected", type="warning")
-            return
-
-        try:
-            count = FlagService.bulk_unflag_tickets(self.current_user_id, self.selected_flagged_tickets)
-            ui.notify(f"Unflagged {count} tickets", type="positive")
-            self.selected_flagged_tickets = []
-            self.refresh_flagged_tab()
-        except Exception as e:
-            import logging
-
-            logging.error(f"Error unflagging tickets: {str(e)}")
-            ui.notify(f"Error unflagging tickets: {str(e)}", type="negative")
-
-    def handle_export_csv(self):
-        """Handle CSV export of flagged tickets"""
-        try:
-            csv_content = ExportService.export_flagged_tickets_csv(
-                self.current_user_id, self.filter_state.to_filter_params()
-            )
-
-            # Create download
-            filename = f"flagged_tickets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-            # Use NiceGUI's download functionality
-            ui.download(csv_content.encode("utf-8"), filename)
-            ui.notify("CSV export downloaded", type="positive")
-
-        except Exception as e:
-            import logging
-
-            logging.error(f"Error exporting CSV: {str(e)}")
-            ui.notify(f"Error exporting CSV: {str(e)}", type="negative")
-
-    def update_url_params(self):
-        """Update URL parameters based on current filter state"""
-        params = self.filter_state.to_url_params()
-        if params:
-            # Note: In a real application, you'd use JavaScript to update URL without reload
-            # For now, this is a placeholder for URL parameter synchronization
-            pass
-
-    def load_from_url_params(self, params: Dict[str, Any]):
-        """Load filter state from URL parameters"""
-        self.filter_state.from_url_params(params)
+logger = logging.getLogger(__name__)
 
 
 def create():
-    """Create the dashboard module"""
+    """Create dashboard module with routing"""
 
-    dashboard_state = DashboardState()
+    # Apply modern theme
+    ui.colors(
+        primary="#2563eb",  # Professional blue
+        secondary="#64748b",  # Subtle gray
+        accent="#10b981",  # Success green
+        positive="#10b981",
+        negative="#ef4444",  # Error red
+        warning="#f59e0b",  # Warning amber
+        info="#3b82f6",  # Info blue
+    )
 
     @ui.page("/")
-    async def dashboard_page():
-        """Main dashboard page"""
+    def dashboard_page():
+        """Main dashboard page with ticket table and statistics"""
+        create_dashboard_ui()
 
-        # Load URL parameters
-        # In a real app, you'd extract these from the request
-        url_params = {}
-        dashboard_state.load_from_url_params(url_params)
 
-        # Apply modern theme
-        ui.colors(
-            primary="#2563eb",
-            secondary="#64748b",
-            accent="#10b981",
-            positive="#10b981",
-            negative="#ef4444",
-            warning="#f59e0b",
-            info="#3b82f6",
+def create_dashboard_ui():
+    """Create the main dashboard UI"""
+
+    # Page header
+    with ui.row().classes("w-full justify-between items-center mb-6"):
+        ui.label("Ticket Dashboard").classes("text-3xl font-bold text-gray-800")
+        ui.button("Refresh Data", on_click=lambda: refresh_dashboard(), icon="refresh").classes(
+            "bg-primary text-white px-4 py-2"
         )
 
-        # Create topbar
-        create_topbar()
+    # Statistics cards
+    stats_container = ui.row().classes("w-full gap-4 mb-6")
+    create_stats_cards(stats_container)
 
-        # Main content
-        with ui.column().classes("w-full max-w-7xl mx-auto p-6"):
-            # Get available filter values
-            try:
-                available_values = TicketService.get_available_filter_values()
-            except Exception as e:
-                import logging
+    # Filters section
+    filters_container = ui.card().classes("w-full p-4 mb-4")
+    with filters_container:
+        ui.label("Filters").classes("text-lg font-semibold mb-3")
+        create_filters_ui()
 
-                logging.error(f"Error getting filter values: {str(e)}")
-                available_values = {"teams": [], "severities": [], "statuses": []}
+    # Main tickets table
+    table_container = ui.card().classes("w-full p-4")
+    with table_container:
+        ui.label("Tickets").classes("text-lg font-semibold mb-4")
+        create_tickets_table()
 
-            # Create filter bar
-            create_filter_bar(dashboard_state.filter_state, available_values)
 
-            # KPI section
-            dashboard_state.kpi_container = ui.column().classes("w-full")
-            with dashboard_state.kpi_container:
-                ui.label("Loading KPIs...").classes("text-center p-4")
+def create_stats_cards(container):
+    """Create statistics cards for dashboard overview"""
+    try:
+        stats = DashboardService.get_dashboard_stats()
 
-            # Charts section
-            dashboard_state.charts_container = ui.column().classes("w-full")
-            with dashboard_state.charts_container:
-                ui.label("Loading charts...").classes("text-center p-4")
+        with container:
+            # Total tickets card
+            with ui.card().classes("p-4 bg-white shadow-lg rounded-xl hover:shadow-xl transition-shadow min-w-48"):
+                ui.label("Total Tickets").classes("text-sm text-gray-500 uppercase tracking-wider")
+                ui.label(str(stats["total_tickets"])).classes("text-3xl font-bold text-gray-800 mt-2")
 
-            # Tabs section
-            with ui.tabs().classes("w-full") as tabs:
-                tickets_tab = ui.tab("Tickets")
-                flagged_tab = ui.tab("Flagged Tickets")
+            # Open tickets card
+            open_count = stats["status_breakdown"].get("open", 0)
+            with ui.card().classes("p-4 bg-white shadow-lg rounded-xl hover:shadow-xl transition-shadow min-w-48"):
+                ui.label("Open Tickets").classes("text-sm text-gray-500 uppercase tracking-wider")
+                ui.label(str(open_count)).classes("text-3xl font-bold text-blue-600 mt-2")
 
-            with ui.tab_panels(tabs, value=tickets_tab).classes("w-full"):
-                # Tickets tab
-                with ui.tab_panel(tickets_tab):
-                    dashboard_state.tickets_container = ui.column().classes("w-full")
-                    with dashboard_state.tickets_container:
-                        ui.label("Loading tickets...").classes("text-center p-4")
+            # In progress card
+            in_progress = stats["status_breakdown"].get("in_progress", 0)
+            with ui.card().classes("p-4 bg-white shadow-lg rounded-xl hover:shadow-xl transition-shadow min-w-48"):
+                ui.label("In Progress").classes("text-sm text-gray-500 uppercase tracking-wider")
+                ui.label(str(in_progress)).classes("text-3xl font-bold text-yellow-600 mt-2")
 
-                # Flagged tickets tab
-                with ui.tab_panel(flagged_tab):
-                    dashboard_state.flagged_container = ui.column().classes("w-full")
-                    with dashboard_state.flagged_container:
-                        ui.label("Loading flagged tickets...").classes("text-center p-4")
+            # Resolved tickets card
+            resolved = stats["status_breakdown"].get("resolved", 0)
+            with ui.card().classes("p-4 bg-white shadow-lg rounded-xl hover:shadow-xl transition-shadow min-w-48"):
+                ui.label("Resolved").classes("text-sm text-gray-500 uppercase tracking-wider")
+                ui.label(str(resolved)).classes("text-3xl font-bold text-green-600 mt-2")
 
-        # Initial data load
-        await asyncio.sleep(0.1)  # Allow UI to render first
-        dashboard_state.refresh_dashboard()
+            # Average resolution time card
+            avg_hours = stats.get("avg_resolution_hours")
+            avg_display = f"{avg_hours:.1f}h" if avg_hours and avg_hours > 0 else "N/A"
+            with ui.card().classes("p-4 bg-white shadow-lg rounded-xl hover:shadow-xl transition-shadow min-w-48"):
+                ui.label("Avg Resolution Time").classes("text-sm text-gray-500 uppercase tracking-wider")
+                ui.label(avg_display).classes("text-3xl font-bold text-purple-600 mt-2")
 
-    # Note: API endpoints would typically be handled by FastAPI routes
-    # For this demo, we'll use simple button handlers instead
+    except Exception as e:
+        logger.error(f"Error loading statistics: {str(e)}")
+        ui.notify(f"Error loading statistics: {str(e)}", type="negative")
 
-    # Development seed data endpoint
-    @ui.page("/seed")
-    def seed_data():
-        """Development endpoint to create sample data"""
-        try:
-            SeedService.create_sample_tickets(100)
-            ui.label("✅ Created 100 sample tickets").classes("text-green-600 text-center p-8")
-            ui.link("Go to Dashboard", "/").classes("block text-center mt-4")
-        except Exception as e:
-            import logging
 
-            logging.error(f"Error creating sample data: {str(e)}")
-            ui.label(f"❌ Error creating sample data: {str(e)}").classes("text-red-600 text-center p-8")
+def create_filters_ui():
+    """Create filters for ticket table"""
+    with ui.row().classes("w-full gap-4 flex-wrap"):
+        # Status filter
+        status_options = ["All Statuses"] + [status.value.replace("_", " ").title() for status in TicketStatus]
+        status_select = ui.select(options=status_options, value="All Statuses", label="Status").classes("min-w-40")
+
+        # Priority filter
+        priority_options = ["All Priorities"] + [priority.value.title() for priority in TicketPriority]
+        priority_select = ui.select(options=priority_options, value="All Priorities", label="Priority").classes(
+            "min-w-40"
+        )
+
+        # Category filter
+        category_options = ["All Categories"] + [
+            category.value.replace("_", " ").title() for category in TicketCategory
+        ]
+        category_select = ui.select(options=category_options, value="All Categories", label="Category").classes(
+            "min-w-40"
+        )
+
+        # Search input
+        search_input = ui.input(label="Search", placeholder="Search in title, description, tags...").classes("min-w-64")
+
+        # Apply filters button
+        ui.button(
+            "Apply Filters",
+            on_click=lambda: apply_filters(
+                status_select.value, priority_select.value, category_select.value, search_input.value
+            ),
+            icon="filter_list",
+        ).classes("bg-secondary text-white px-4 py-2")
+
+        # Clear filters button
+        ui.button(
+            "Clear",
+            on_click=lambda: clear_filters(status_select, priority_select, category_select, search_input),
+            icon="clear",
+        ).props("outline").classes("px-4 py-2")
+
+
+def create_tickets_table():
+    """Create the main tickets table with actions"""
+    try:
+        tickets = DashboardService.get_all_tickets()
+
+        # Prepare table data
+        columns = [
+            {"name": "id", "label": "ID", "field": "id", "sortable": True, "align": "left"},
+            {"name": "title", "label": "Title", "field": "title", "sortable": True, "align": "left"},
+            {"name": "status", "label": "Status", "field": "status", "sortable": True},
+            {"name": "priority", "label": "Priority", "field": "priority", "sortable": True},
+            {"name": "category", "label": "Category", "field": "category", "sortable": True},
+            {"name": "creator_name", "label": "Creator", "field": "creator_name", "sortable": True},
+            {"name": "assignee_name", "label": "Assignee", "field": "assignee_name", "sortable": True},
+            {"name": "created_at", "label": "Created", "field": "created_at", "sortable": True},
+        ]
+
+        # Format ticket data for display
+        rows = []
+        for ticket in tickets:
+            # Format datetime for display
+            created_date = datetime.fromisoformat(ticket.created_at).strftime("%Y-%m-%d %H:%M")
+
+            # Format status and priority for display
+            status_display = ticket.status.value.replace("_", " ").title()
+            priority_display = ticket.priority.value.title()
+            category_display = ticket.category.value.replace("_", " ").title()
+
+            rows.append(
+                {
+                    "id": ticket.id,
+                    "title": ticket.title,
+                    "status": status_display,
+                    "priority": priority_display,
+                    "category": category_display,
+                    "creator_name": ticket.creator_name,
+                    "assignee_name": ticket.assignee_name or "Unassigned",
+                    "created_at": created_date,
+                }
+            )
+
+        # Create table
+        table = ui.table(columns=columns, rows=rows, pagination=20).classes("w-full")
+
+        app.storage.client["tickets_table"] = table
+
+        # Add action buttons below table
+        with ui.row().classes("gap-2 mt-4"):
+            ui.button("Refresh Table", on_click=lambda: refresh_tickets_table(), icon="refresh").classes(
+                "bg-secondary text-white px-4 py-2"
+            )
+
+    except Exception as e:
+        logger.error(f"Error loading tickets: {str(e)}")
+        ui.notify(f"Error loading tickets: {str(e)}", type="negative")
+
+
+def apply_filters(status_filter, priority_filter, category_filter, search_term):
+    """Apply filters to tickets table"""
+    try:
+        # Convert filter values back to enums or None
+        status = None
+        if status_filter != "All Statuses":
+            for s in TicketStatus:
+                if s.value.replace("_", " ").title() == status_filter:
+                    status = s
+                    break
+
+        priority = None
+        if priority_filter != "All Priorities":
+            for p in TicketPriority:
+                if p.value.title() == priority_filter:
+                    priority = p
+                    break
+
+        category = None
+        if category_filter != "All Categories":
+            for c in TicketCategory:
+                if c.value.replace("_", " ").title() == category_filter:
+                    category = c
+                    break
+
+        # Convert empty strings to None
+        search_term = search_term.strip() if search_term and search_term.strip() else None
+
+        filtered_tickets = DashboardService.filter_tickets(
+            status=status, priority=priority, category=category, search_term=search_term
+        )
+
+        # Update table with filtered data
+        refresh_tickets_table(filtered_tickets)
+        ui.notify(f"Found {len(filtered_tickets)} tickets", type="info")
+
+    except Exception as e:
+        logger.error(f"Error applying filters: {str(e)}")
+        ui.notify(f"Error applying filters: {str(e)}", type="negative")
+
+
+def clear_filters(status_select, priority_select, category_select, search_input):
+    """Clear all filters and refresh table"""
+    status_select.set_value("All Statuses")
+    priority_select.set_value("All Priorities")
+    category_select.set_value("All Categories")
+    search_input.set_value("")
+    refresh_dashboard()
+
+
+def refresh_tickets_table(tickets=None):
+    """Refresh the tickets table with new data"""
+    if tickets is None:
+        tickets = DashboardService.get_all_tickets()
+
+    # Get stored table reference
+    table = app.storage.client.get("tickets_table")
+    if table:
+        # Format ticket data for display
+        rows = []
+        for ticket in tickets:
+            created_date = datetime.fromisoformat(ticket.created_at).strftime("%Y-%m-%d %H:%M")
+            status_display = ticket.status.value.replace("_", " ").title()
+            priority_display = ticket.priority.value.title()
+            category_display = ticket.category.value.replace("_", " ").title()
+
+            rows.append(
+                {
+                    "id": ticket.id,
+                    "title": ticket.title,
+                    "status": status_display,
+                    "priority": priority_display,
+                    "category": category_display,
+                    "creator_name": ticket.creator_name,
+                    "assignee_name": ticket.assignee_name or "Unassigned",
+                    "created_at": created_date,
+                }
+            )
+
+        table.rows = rows
+        table.update()
+
+
+def refresh_dashboard():
+    """Refresh the entire dashboard by navigating to the same page"""
+    ui.navigate.to("/", new_tab=False)

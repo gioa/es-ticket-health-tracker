@@ -1,3 +1,3 @@
 def test_dummy():
-    """Basic test to ensure test framework works"""
-    assert 1 + 1 == 2
+    # This is a dummy test to ensure that the testing framework collects the tests correctly.
+    assert True

@@ -158,9 +158,7 @@ python-engineio==4.12.2
     #   nicegui
     #   python-socketio
 python-multipart==0.0.20
-    # via
-    #   nicegui
-    #   template
+    # via nicegui
 python-socketio==5.13.0
     # via nicegui
 pyyaml==6.0.2
