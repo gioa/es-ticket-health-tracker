@@ -1,143 +1,222 @@
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import SQLModel, Field, Relationship, JSON, Column
 from datetime import datetime
-from typing import Optional, List
-from enum import Enum
-
-
-class TicketStatus(str, Enum):
-    """Ticket status enumeration"""
-
-    OPEN = "open"
-    IN_PROGRESS = "in_progress"
-    RESOLVED = "resolved"
-    CLOSED = "closed"
-
-
-class TicketPriority(str, Enum):
-    """Ticket priority enumeration"""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-class TicketCategory(str, Enum):
-    """Ticket category enumeration"""
-
-    BUG = "bug"
-    FEATURE_REQUEST = "feature_request"
-    SUPPORT = "support"
-    MAINTENANCE = "maintenance"
-    OTHER = "other"
+from typing import Optional, List, Dict
+from decimal import Decimal
 
 
 # Persistent models (stored in database)
+
+
+class ESTicket(SQLModel, table=True):
+    """Main ES ticket model with all required fields"""
+
+    __tablename__ = "es_tickets"  # type: ignore[assignment]
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    key: str = Field(unique=True, max_length=50, index=True)  # Ticket key like "ES-1234"
+    summary: str = Field(max_length=1000)  # Used as title in UI
+    description: Optional[str] = Field(default=None, max_length=10000)
+    status: str = Field(max_length=100, index=True)
+    type: Optional[str] = Field(default=None, max_length=100)
+    priority: Optional[str] = Field(default=None, max_length=50)
+    resolution: Optional[str] = Field(default=None, max_length=200)
+    created: datetime = Field(index=True)  # Ticket creation date
+    updated: datetime = Field(index=True)  # Last updated date
+    assignee: Optional[str] = Field(default=None, max_length=200)
+    eng_team: Optional[str] = Field(default=None, max_length=100, index=True)  # Engineering team
+    severity: Optional[str] = Field(default=None, max_length=50, index=True)
+    outage_start_date: Optional[datetime] = Field(default=None)
+    outage_end_date: Optional[datetime] = Field(default=None)
+    es_components: Optional[List[str]] = Field(default=None, sa_column=Column(JSON))  # JSON list of components
+
+    # Computed fields for analytics
+    mitigated_date: Optional[datetime] = Field(default=None)  # When ticket was mitigated
+    resolved_date: Optional[datetime] = Field(default=None)  # When ticket was resolved
+    time_to_resolve_hours: Optional[Decimal] = Field(default=None, decimal_places=2)  # Hours to resolve
+
+    # Import/sync metadata
+    imported_at: datetime = Field(default_factory=datetime.utcnow)
+    last_synced: datetime = Field(default_factory=datetime.utcnow)
+
+    # Relationships
+    flags: List["UserTicketFlag"] = Relationship(back_populates="ticket")
+
+
 class User(SQLModel, table=True):
-    """User model for ticket assignment and creation tracking"""
+    """User model for tracking who flags tickets"""
 
     __tablename__ = "users"  # type: ignore[assignment]
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(max_length=100)
-    email: str = Field(unique=True, max_length=255)
+    username: str = Field(unique=True, max_length=100, index=True)
+    email: Optional[str] = Field(default=None, max_length=255)
+    display_name: Optional[str] = Field(default=None, max_length=200)
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login: Optional[datetime] = Field(default=None)
 
     # Relationships
-    created_tickets: List["Ticket"] = Relationship(
-        back_populates="creator", sa_relationship_kwargs={"foreign_keys": "[Ticket.creator_id]"}
-    )
-    assigned_tickets: List["Ticket"] = Relationship(
-        back_populates="assignee", sa_relationship_kwargs={"foreign_keys": "[Ticket.assignee_id]"}
-    )
+    flags: List["UserTicketFlag"] = Relationship(back_populates="user")
 
 
-class Ticket(SQLModel, table=True):
-    """Main ticket model for the dashboard"""
+class UserTicketFlag(SQLModel, table=True):
+    """Junction table for user flagged tickets"""
 
-    __tablename__ = "tickets"  # type: ignore[assignment]
+    __tablename__ = "user_ticket_flags"  # type: ignore[assignment]
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    title: str = Field(max_length=200)
-    description: str = Field(default="", max_length=2000)
-    status: TicketStatus = Field(default=TicketStatus.OPEN)
-    priority: TicketPriority = Field(default=TicketPriority.MEDIUM)
-    category: TicketCategory = Field(default=TicketCategory.OTHER)
-
-    # Foreign keys
-    creator_id: int = Field(foreign_key="users.id")
-    assignee_id: Optional[int] = Field(default=None, foreign_key="users.id")
-
-    # Timestamps
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-    resolved_at: Optional[datetime] = Field(default=None)
-
-    # Additional fields for dashboard functionality
-    estimated_hours: Optional[float] = Field(default=None, ge=0)
-    actual_hours: Optional[float] = Field(default=None, ge=0)
-    tags: str = Field(default="", max_length=500)  # Comma-separated tags
+    user_id: int = Field(foreign_key="users.id", index=True)
+    ticket_id: int = Field(foreign_key="es_tickets.id", index=True)
+    flagged_at: datetime = Field(default_factory=datetime.utcnow)
+    notes: Optional[str] = Field(default=None, max_length=1000)  # Optional user notes
 
     # Relationships
-    creator: User = Relationship(
-        back_populates="created_tickets", sa_relationship_kwargs={"foreign_keys": "[Ticket.creator_id]"}
-    )
-    assignee: Optional[User] = Relationship(
-        back_populates="assigned_tickets", sa_relationship_kwargs={"foreign_keys": "[Ticket.assignee_id]"}
-    )
+    user: User = Relationship(back_populates="flags")
+    ticket: ESTicket = Relationship(back_populates="flags")
+
+
+class TeamConfig(SQLModel, table=True):
+    """Configuration for engineering teams"""
+
+    __tablename__ = "team_configs"  # type: ignore[assignment]
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    team_name: str = Field(unique=True, max_length=100, index=True)
+    display_name: str = Field(max_length=200)
+    is_active: bool = Field(default=True)
+    team_lead: Optional[str] = Field(default=None, max_length=200)
+    slack_channel: Optional[str] = Field(default=None, max_length=100)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TicketImportLog(SQLModel, table=True):
+    """Log of ticket import/sync operations"""
+
+    __tablename__ = "ticket_import_logs"  # type: ignore[assignment]
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    import_started: datetime = Field(default_factory=datetime.utcnow)
+    import_completed: Optional[datetime] = Field(default=None)
+    tickets_processed: int = Field(default=0)
+    tickets_created: int = Field(default=0)
+    tickets_updated: int = Field(default=0)
+    status: str = Field(default="running", max_length=50)  # running, completed, failed
+    error_message: Optional[str] = Field(default=None, max_length=2000)
+    import_source: str = Field(max_length=100)  # e.g., "jira_api", "csv_upload"
 
 
 # Non-persistent schemas (for validation, forms, API requests/responses)
+
+
+class ESTicketCreate(SQLModel, table=False):
+    """Schema for creating new ES tickets"""
+
+    key: str = Field(max_length=50)
+    summary: str = Field(max_length=1000)
+    description: Optional[str] = Field(default=None, max_length=10000)
+    status: str = Field(max_length=100)
+    type: Optional[str] = Field(default=None, max_length=100)
+    priority: Optional[str] = Field(default=None, max_length=50)
+    resolution: Optional[str] = Field(default=None, max_length=200)
+    created: datetime
+    updated: datetime
+    assignee: Optional[str] = Field(default=None, max_length=200)
+    eng_team: Optional[str] = Field(default=None, max_length=100)
+    severity: Optional[str] = Field(default=None, max_length=50)
+    outage_start_date: Optional[datetime] = Field(default=None)
+    outage_end_date: Optional[datetime] = Field(default=None)
+    es_components: Optional[List[str]] = Field(default=None)
+
+
+class ESTicketUpdate(SQLModel, table=False):
+    """Schema for updating ES tickets"""
+
+    summary: Optional[str] = Field(default=None, max_length=1000)
+    description: Optional[str] = Field(default=None, max_length=10000)
+    status: Optional[str] = Field(default=None, max_length=100)
+    type: Optional[str] = Field(default=None, max_length=100)
+    priority: Optional[str] = Field(default=None, max_length=50)
+    resolution: Optional[str] = Field(default=None, max_length=200)
+    updated: Optional[datetime] = Field(default=None)
+    assignee: Optional[str] = Field(default=None, max_length=200)
+    eng_team: Optional[str] = Field(default=None, max_length=100)
+    severity: Optional[str] = Field(default=None, max_length=50)
+    outage_start_date: Optional[datetime] = Field(default=None)
+    outage_end_date: Optional[datetime] = Field(default=None)
+    es_components: Optional[List[str]] = Field(default=None)
+    mitigated_date: Optional[datetime] = Field(default=None)
+    resolved_date: Optional[datetime] = Field(default=None)
+
+
 class UserCreate(SQLModel, table=False):
-    """Schema for creating new users"""
+    """Schema for creating users"""
 
-    name: str = Field(max_length=100)
-    email: str = Field(max_length=255)
-
-
-class TicketCreate(SQLModel, table=False):
-    """Schema for creating new tickets"""
-
-    title: str = Field(max_length=200)
-    description: str = Field(default="", max_length=2000)
-    priority: TicketPriority = Field(default=TicketPriority.MEDIUM)
-    category: TicketCategory = Field(default=TicketCategory.OTHER)
-    creator_id: int
-    assignee_id: Optional[int] = Field(default=None)
-    estimated_hours: Optional[float] = Field(default=None, ge=0)
-    tags: str = Field(default="", max_length=500)
+    username: str = Field(max_length=100)
+    email: Optional[str] = Field(default=None, max_length=255)
+    display_name: Optional[str] = Field(default=None, max_length=200)
 
 
-class TicketUpdate(SQLModel, table=False):
-    """Schema for updating existing tickets"""
+class UserTicketFlagCreate(SQLModel, table=False):
+    """Schema for creating ticket flags"""
 
-    title: Optional[str] = Field(default=None, max_length=200)
-    description: Optional[str] = Field(default=None, max_length=2000)
-    status: Optional[TicketStatus] = Field(default=None)
-    priority: Optional[TicketPriority] = Field(default=None)
-    category: Optional[TicketCategory] = Field(default=None)
-    assignee_id: Optional[int] = Field(default=None)
-    estimated_hours: Optional[float] = Field(default=None, ge=0)
-    actual_hours: Optional[float] = Field(default=None, ge=0)
-    tags: Optional[str] = Field(default=None, max_length=500)
-    resolved_at: Optional[datetime] = Field(default=None)
+    user_id: int
+    ticket_id: int
+    notes: Optional[str] = Field(default=None, max_length=1000)
 
 
-class TicketResponse(SQLModel, table=False):
-    """Schema for ticket API responses with related data"""
+class FilterParams(SQLModel, table=False):
+    """Schema for global filter parameters"""
 
-    id: int
+    date_start: Optional[datetime] = Field(default=None)
+    date_end: Optional[datetime] = Field(default=None)
+    teams: Optional[List[str]] = Field(default=None)
+    severities: Optional[List[str]] = Field(default=None)
+    statuses: Optional[List[str]] = Field(default=None)
+
+
+class KPIData(SQLModel, table=False):
+    """Schema for KPI card data"""
+
+    tickets_created: int
+    tickets_mitigated: int
+    open_tickets: int
+    avg_time_to_resolve_hours: Optional[Decimal] = Field(default=None, decimal_places=2)
+
+
+class TimeSeriesPoint(SQLModel, table=False):
+    """Schema for time series chart data points"""
+
+    date: str  # ISO format date string
+    created: int
+    mitigated: int
+    resolved: int
+
+
+class StackedBarData(SQLModel, table=False):
+    """Schema for stacked bar chart data"""
+
+    status: str
+    severity_counts: Dict[str, int]
+
+
+class TeamTicketCount(SQLModel, table=False):
+    """Schema for team ticket count data"""
+
+    team: str
+    ticket_count: int
+
+
+class TicketExportRow(SQLModel, table=False):
+    """Schema for CSV export of tickets"""
+
+    key: str
     title: str
-    description: str
-    status: TicketStatus
-    priority: TicketPriority
-    category: TicketCategory
-    creator_name: str
-    assignee_name: Optional[str]
-    created_at: str  # ISO format datetime string
-    updated_at: str  # ISO format datetime string
-    resolved_at: Optional[str]  # ISO format datetime string
-    estimated_hours: Optional[float]
-    actual_hours: Optional[float]
-    tags: str
+    team: Optional[str]
+    severity: Optional[str]
+    status: str
+    created: str  # ISO format
+    updated: str  # ISO format
+    assignee: Optional[str]
+    time_to_resolve_hours: Optional[Decimal]
+    flagged_at: Optional[str]  # ISO format, only for flagged tickets
+    flag_notes: Optional[str]
